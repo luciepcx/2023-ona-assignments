@@ -1,0 +1,62 @@
+The idea in this exercise is to deep dive into my LinkedIn contacts and understand the network behinf it creating nodes and edges. I made an attempt to plot it. 
+
+
+df<-read_csv('C:/Users/33652/Documents/Canada/Mcgill/COURS/Winter semester/Orgaziational Network/Connections.csv')
+attach(df)
+
+
+### Count by employer and total count
+
+library(dplyr)
+counts_by_employer <- df %>% 
+  group_by(if_else(is.na(Company), "No employer", Company)) %>% 
+  summarize(count = n()) %>% 
+  arrange(desc(count))
+
+total_count <- nrow(df)
+
+print(counts_by_employer)
+print(paste0("Total count: ", total_count))
+
+
+
+### Edges and Nodes
+
+install.packages('tidygraph')
+library(tidygraph)
+
+#Taking everyone except the one with no company
+connections <- df %>%
+  filter(!is.na(Company)) %>%
+  mutate(name = paste0(`First Name`, " ", substr(`Last Name`, 1, 1)),
+         Company = Company) %>%
+  mutate(from=name,
+         to=Company) %>%
+  select(from, to)
+
+graph_connections <- as_tbl_graph(connections)
+graph_connections  
+
+
+library(stringr)
+
+graph_connections <- graph_connections %>%
+  activate(nodes)
+
+
+### Plotting the network
+installed.packages('ggraph')
+library(ggraph)
+
+graph_connections %>%
+  ggraph(layout = "kk") +
+  geom_node_point() +
+  geom_edge_diagonal() 
+
+
+graph_connections %>%
+  ggraph(layout = "kk") +
+  geom_node_text(aes(label = name, color = name), size = 3) +
+  geom_edge_diagonal(color = "gray", alpha = 0.4) 
+
+
