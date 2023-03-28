@@ -1,0 +1,346 @@
+---
+title: "Exercise 3"
+output: github_document
+---
+
+```{r}
+#Importing the libraries
+library(arrow)
+library(readr)
+library(wru)
+library(lubridate)
+library(ggplot2)
+library(tidygraph)
+library(igraph)
+library(visNetwork)
+
+#Importing the datsets
+applications <- read_parquet("C:/Users/33652/Documents/Canada/Mcgill/COURS/Winter semester/Orgaziational Network/app_data_sample.parquet",as_data_frame=TRUE)
+edges <- read_csv("C:/Users/33652/Documents/Canada/Mcgill/COURS/Winter semester/Orgaziational Network/edges_sample.csv")
+
+```
+
+
+Question 1
+
+The first part of this exercise is made with the help of the code given by the prof regarding the race, gender and tenure of the different examiners
+
+```{r setup, include=FALSE}
+examiner_names <- applications %>% 
+  distinct(examiner_name_first)
+
+examiner_names
+
+examiner_names_gender <- examiner_names %>% 
+  do(results = gender(.$examiner_name_first, method = "ssa")) %>% 
+  unnest(cols = c(results), keep_empty = TRUE) %>% 
+  select(
+    examiner_name_first = name,
+    gender,
+    proportion_female
+  )
+
+examiner_names_gender
+
+# remove extra colums from the gender table
+examiner_names_gender <- examiner_names_gender %>% 
+  select(examiner_name_first, gender)
+
+# joining gender back to the dataset
+applications <- applications %>% 
+  left_join(examiner_names_gender, by = "examiner_name_first")
+
+# cleaning up
+rm(examiner_names)
+rm(examiner_names_gender)
+gc()
+
+
+#Finding the race of the examiner
+
+examiner_surnames <- applications %>% 
+  select(surname = examiner_name_last) %>% 
+  distinct()
+
+examiner_surnames
+
+examiner_race <- predict_race(voter.file = examiner_surnames, surname.only = T) %>% 
+  as_tibble()
+
+examiner_race
+
+
+examiner_race <- examiner_race %>% 
+  mutate(max_race_p = pmax(pred.asi, pred.bla, pred.his, pred.oth, pred.whi)) %>% 
+  mutate(race = case_when(
+    max_race_p == pred.asi ~ "Asian",
+    max_race_p == pred.bla ~ "black",
+    max_race_p == pred.his ~ "Hispanic",
+    max_race_p == pred.oth ~ "other",
+    max_race_p == pred.whi ~ "white",
+    TRUE ~ NA_character_
+  ))
+
+examiner_race
+
+# removing extra columns
+examiner_race <- examiner_race %>% 
+  select(surname,race)
+
+applications <- applications %>% 
+  left_join(examiner_race, by = c("examiner_name_last" = "surname"))
+
+rm(examiner_race)
+rm(examiner_surnames)
+gc()
+
+#Tenure
+
+examiner_dates <- applications %>% 
+  select(examiner_id, filing_date, appl_status_date) 
+
+examiner_dates
+
+examiner_dates <- examiner_dates %>% 
+  mutate(start_date = ymd(filing_date), end_date = as_date(dmy_hms(appl_status_date)))
+
+examiner_dates <- examiner_dates %>% 
+  group_by(examiner_id) %>% 
+  summarise(
+    earliest_date = min(start_date, na.rm = TRUE), 
+    latest_date = max(end_date, na.rm = TRUE),
+    tenure_days = interval(earliest_date, latest_date) %/% days(1)
+  ) %>% 
+  filter(year(latest_date)<2018)
+
+examiner_dates
+
+applications <- applications %>% 
+  left_join(examiner_dates, by = "examiner_id")
+
+rm(examiner_dates)
+gc()
+```
+
+Question 2
+
+We want to focuse on 2 workgroups. To do so, I check wich 2 workgroups are the ones with the most people in them. 
+
+```{r}
+#Let's define the workgroups first
+applications$workgroups<-substr(applications$examiner_art_unit,1,3)
+
+#Find 2 workgroups with the most people to compare them 
+workgroup_count <- table(applications$workgroups)
+sorted_workgroup_count <- sort(workgroup_count, decreasing = TRUE)
+head(sorted_workgroup_count, n = 2)
+```
+It appears that group 162 and 179 have the most people. Those are the 2 workgroups I'm going to focus on for the rest of the assignment. 
+An examiner can be mentionned several times in a workgroups depending on the dates or other factors. To avoid disorting the data, I chose to only kept one row for each examiner and to delete duplicates 
+
+```{r}
+workgroup_179 <- subset(applications, workgroups == "179")
+workgroup_179<- workgroup_179 %>% group_by(examiner_id) %>% slice(1)
+workgroup_162 <- subset(applications, workgroups == "162")
+workgroup_162<- workgroup_162 %>% group_by(examiner_id) %>% slice(1)
+
+##Let's check the demographic for each group
+table(workgroup_179$gender)
+```
+```{r}
+table(workgroup_179$race)
+```
+```{r}
+table(workgroup_162$gender)
+```
+
+```{r}
+table(workgroup_162$race)
+```
+
+Both workgroup are composed by a majority of white person, followed by Asian then Black then Hispanic. Major part of the examiner are also Male. 
+
+I also did some plotting to understang the repartition. 
+
+```{r}
+ggplot(workgroup_179,aes(x=race, fill=gender))+
+  geom_bar(position="dodge")+
+  xlab("Race")+
+  ylab("Count")+
+  ggtitle("Demographic for workgroup 179")
+```
+```{r}
+ggplot(workgroup_162,aes(x=race, fill=gender))+
+  geom_bar(position="dodge")+
+  xlab("Race")+
+  ylab("Count")+
+  ggtitle("Demographic for workgroup 162")
+```
+
+
+Question 3
+
+We now want to look at the centrality scores for people from the 2 workgroups previsouly selected.
+First step is to create a new dataset with only the rows from the applications where the examiner id from workgroups 179 and 162. Here again we remove the duplicates.
+For the edges as well, we only want to keep the edges with the examiner_id within the new_dataset created. I'm also only keeping the columns I need and renaming the egdes with "from" and "to" to be able to use them later. 
+
+```{r}
+#We're only looking at the examiners in our 2 workgroups
+new_dataset <- rbind(workgroup_179, workgroup_162)
+
+#Same for the edges dataset we only want to keep the edges going from an examiner id within our subset
+edges_df<-edges
+edges<edges_df
+
+edges<-edges%>%
+  filter(ego_examiner_id %in% new_dataset$examiner_id)%>%
+  drop_na()%>%
+  mutate(from=ego_examiner_id, to=alter_examiner_id)%>%
+  select(from,to)
+
+```
+
+We can then create the nodes dataset
+
+```{r}
+
+#Creating the nodes dataset only with the examiner ids from the selected workgroups
+nodes<-select(new_dataset, examiner_id)
+
+```
+
+
+
+```{r}
+visNetwork(nodes, edges) %>%
+  visLegend() %>%
+  visEdges(
+    arrows = list(
+      to = list(
+        scaleFactor = 0.75,
+        type = "arrow"
+      ),
+      from = list(
+        scaleFactor = 0.75,
+        type = "arrow"
+      )
+    )
+  )
+
+
+```
+
+
+The nest step is to calculte the centrality scores. I first tried the following code but with no success
+```{r}
+
+###Tries to put the degree centrality on the visnetwork reprensetation but there are too many nodes. 
+##Calculating the degree centrality 
+#g <- graph_from_data_frame(edges, directed = FALSE)
+
+# calculate the degree centrality of each node
+#degree <- centr_degree(g)$degree
+
+# add the degree values as a node attribute in your nodes data frame
+#nodes$degree_centrality <- degree
+
+# plot the network with degree values as labels
+#visNetwork(nodes, edges) %>%
+#  visNodes(label = "degree_centrality")
+```
+
+I've been able to resolve the problem with the following codes:
+
+Centrality degree 
+```{r}
+###Centrality degree that works 
+
+graph <- graph_from_data_frame(edges, directed = TRUE)
+
+#degree centrality of each node
+deg <- degree(graph)
+centrality_table <- data.frame(node = V(graph)$name, degree_centrality = deg)
+centrality_table <- centrality_table[order(-centrality_table$degree_centrality),]
+
+# Top 20 nodes with highest centrality
+head(centrality_table, n = 20)
+```
+
+Closeness degree 
+```{r}
+#Closeness centrality
+closeness<-closeness(graph, mode='out')
+closeness_table <- data.frame(node = V(graph)$name, closeness_centrality = closeness)
+closeness_table <- closeness_table[order(-closeness_table$closeness_centrality),]
+
+head(closeness_table, n = 20)
+```
+
+```{r}
+#Betweeness Centrality
+betweenness <- betweenness(graph, directed = TRUE)
+betweenness_table <- data.frame(node = V(graph)$name, betweenness_centrality = betweenness)
+betweenness_table <- betweenness_table[order(-betweenness_table$betweenness_centrality),]
+head(betweenness_table, n=20)
+
+```
+
+I then added thos centrality scores to the main dataset to be able to study it better
+```{r}
+
+##To better be able to check the data, let's add the centralitys to the examiners dataset
+# Create degree centrality data frame
+deg_centrality <- data.frame(examiner_id = V(graph)$name, degree_centrality = deg)
+close_centrality <- data.frame(examiner_id = V(graph)$name, closeness_centrality = closeness)
+between_centrality <- data.frame(examiner_id = V(graph)$name, betweenness_centrality = betweenness)
+
+# Merge new_dataset with degree centrality, closeness centrality, and betweenness centrality data frames
+merged_dataset <- merge(new_dataset, deg_centrality, by = "examiner_id")
+merged_dataset <- merge(merged_dataset, close_centrality, by = "examiner_id")
+merged_dataset <- merge(merged_dataset, between_centrality, by = "examiner_id")
+```
+
+
+I've decided to plot the degree centrality depending on the race depending on the work group.
+
+```{r}
+#degree centrality
+plot_data <- merged_dataset %>%
+  group_by(workgroups, race) %>%
+  summarize(degree_centrality = sum(degree_centrality)) %>%
+  ungroup()
+
+ggplot(plot_data, aes(x = workgroups, y = degree_centrality, fill = race)) +
+  geom_col(position = "dodge") +
+  labs(x = "Workgroup", y = "Degree Centrality", fill = "Race") +
+  theme_classic()
+```
+
+```{r}
+#closness centrality 
+plot_data <- merged_dataset %>%
+  group_by(workgroups, race) %>%
+  summarize(closeness_centrality = sum(closeness_centrality)) %>%
+  ungroup()
+
+ggplot(plot_data, aes(x = workgroups, y = closeness_centrality, fill = race)) +
+  geom_col(position = "dodge") +
+  labs(x = "Workgroup", y = "Closeness Centrality", fill = "Race") +
+  theme_classic()
+
+```
+
+```{r}
+#Betweeness centrality 
+plot_data <- merged_dataset %>%
+  group_by(workgroups, race) %>%
+  summarize(betweenness_centrality = sum(betweenness_centrality)) %>%
+  ungroup()
+
+ggplot(plot_data, aes(x = workgroups, y = betweenness_centrality, fill = race)) +
+  geom_col(position = "dodge") +
+  labs(x = "Workgroup", y = "Betweeness Centrality", fill = "Race") +
+  theme_classic()
+```
+
+The centrality degree and the betweenness centrality talked to me more than the closeness centrality. One thing we can see is that most of people owning the cenetrality degree and betweeness centrality are white people. This can be explained by the fact that white people represents the major part of thoses groups. What is interesting as well is that it's not what is happening in the closeness centrality. The races showing the highest closeness degree are black and hispanic.It seems like those people can be links between other and even between different groups. They might not have has much connection but hey are as much important. 
