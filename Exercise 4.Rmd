@@ -1,0 +1,249 @@
+---
+title: "Exercise 4"
+author: "Lucie Peccoux"
+date: "2023-03-31"
+output: pdf_document
+---
+
+For this exercise I used a new parquet file called applications 2 that I made based on Exercise 3. Indeed, I created this parquet file with the original app_data_sample file to which I have added the gender, the race, the tenure and the work groups from Exercise 3. The code for how those features were added is available in Exercise 3. 
+
+First step is to import all the libraries needed and the files: 
+
+```{r}
+library(arrow)
+library(dplyr)
+library(tidygraph)
+library(igraph)
+library(visNetwork)
+library(visNetwork)
+library(tidyr)
+library(readr)
+
+
+applications <- read_parquet("C:/Users/33652/Documents/Canada/Mcgill/COURS/Winter semester/Orgaziational Network/applications2.parquet",as_data_frame=TRUE)
+edges <- read_csv("C:/Users/33652/Documents/Canada/Mcgill/COURS/Winter semester/Orgaziational Network/edges_sample.csv")
+
+```
+
+Question 1 : Patent Processing time
+
+The first question required to created the processing time features. I made the choice to create 2 new features : the processing time in days and the processing time in weeks. 
+The processing time can be calculated by counting the days between the application filing date and the date a decision was made. For this last part, we have 2 features to look at : either the patent_issue_date if the patent was granted or the abandon_date if it was not. 
+
+
+```{r}
+#Making sure the dates are read as such by R
+applications$filing_date <- as.Date(applications$filing_date)
+applications$patent_issue_date <- as.Date(applications$patent_issue_date)
+applications$abandon_date <- as.Date(applications$abandon_date)
+
+#Processing time in days
+applications$app_proc_time_days  <- ifelse(!is.na(applications$patent_issue_date), 
+                                       difftime(applications$patent_issue_date, applications$filing_date, units = "days"), 
+                                       difftime(applications$abandon_date, applications$filing_date, units = "days"))
+#Processing time in weeks
+applications$app_proc_time_weeks <- ifelse(!is.na(applications$patent_issue_date), 
+                                        difftime(applications$patent_issue_date, applications$filing_date, units = "weeks"), 
+                                        difftime(applications$abandon_date, applications$filing_date, units = "weeks"))
+
+```
+
+Some dates might have been wrongly reported as some processing times appears to be negative. I decided to remove them from the dataset. 
+
+
+```{r}
+#Removing outliers
+applications <- applications %>% 
+  filter(app_proc_time_days  >= 0)
+
+```
+
+
+Question 2: Use linear regression models `lm()` to estimate the relationship between centrality and `app_proc_time`
+
+The first step to answer this question was to calculated the centralities for each examiner. To do so we need to have nodes and edges. 
+I first took care of the edges. As I removed some outliers I made sure that only the examiners within the applications dataset without the outliers were also in the edges dataset. 
+```{r}
+#Edges dataset
+edges_df<-edges
+edges<-edges_df
+
+#Filtering the data so that only the examiner_id still in the applications dataset stays in the eges dataset
+edges<-edges%>%
+  filter(ego_examiner_id %in% applications$examiner_id)%>%
+  drop_na()%>%
+  mutate(from=ego_examiner_id, to=alter_examiner_id)%>%
+  select(from,to)
+```
+
+I then created a new dataset for the nodes with only the examiner_id from the application dataset. 
+
+```{r}
+nodes<-select(applications, examiner_id)
+```
+After that I used a graph to get the centrality scores with the degree function
+
+```{r}
+graph <- graph_from_data_frame(edges, directed = TRUE)
+#Degree centrality
+deg <- degree(graph)
+centrality_table <- data.frame(node = V(graph)$name, degree_centrality = deg)
+centrality_table <- centrality_table[order(-centrality_table$degree_centrality),]
+
+#Closeness centrality
+closeness<-closeness(graph, mode='out')
+closeness_table <- data.frame(node = V(graph)$name, closeness_centrality = closeness)
+closeness_table <- closeness_table[order(-closeness_table$closeness_centrality),]
+
+#Betweenness Centrality
+betweenness <- betweenness(graph, directed = TRUE)
+betweenness_table <- data.frame(node = V(graph)$name, betweenness_centrality = betweenness)
+betweenness_table <- betweenness_table[order(-betweenness_table$betweenness_centrality),]
+
+
+```
+
+Next step was to add the centrality to the applications dataset
+
+
+```{r}
+
+#Adding it back to the applications dataset
+deg_centrality <- data.frame(examiner_id = V(graph)$name, degree_centrality = deg)
+close_centrality <- data.frame(examiner_id = V(graph)$name, closeness_centrality = closeness)
+between_centrality <- data.frame(examiner_id = V(graph)$name, betweenness_centrality = betweenness)
+
+# Merge new_dataset with degree centrality, closeness centrality, and betweenness centrality data frames
+applications2 <- merge(applications, deg_centrality, by = "examiner_id")
+applications2 <- merge(applications2, close_centrality, by = "examiner_id")
+applications2 <- merge(applications2, between_centrality, by = "examiner_id")
+```
+
+Let's run some linear regression. 
+
+
+```{r}
+model <- lm(app_proc_time_days ~ degree_centrality, data = applications2)
+summary(model)
+
+```
+We can see that there is a significant postive relationship between the degree centrality and the application process time in days. With the intercept we can understand that when the degree centrality is 0, the estimated value of the application process time is 1212 days (which seems to be a lot). We can also understand that, on average, a one unit increase in degree centrality is associated with a 0.5485-unit increase in the process time. 
+
+```{r}
+model2 <- lm(app_proc_time_weeks ~ degree_centrality, data = applications2)
+summary(model2)
+```
+When looking at the the process time in weeks not in days, we can see the same phenomenon. The process time is positively correlated with the degree centrality and for one unit increase in the degree centrality, the process time increase on average by 0.078 unit. 
+
+
+Let's look at the betweenness cetrality and lead the same analysis. 
+
+```{r}
+model3 <- lm(app_proc_time_days ~ betweenness_centrality, data = applications2)
+summary(model3)
+```
+
+```{r}
+model4 <- lm(app_proc_time_weeks ~ betweenness_centrality, data = applications2)
+summary(model4)
+```
+
+Here again we can witness a positive relationship between the betweenness centrality and the application process time. It seems like an increase of one unit in the betweeness centrality will most likely increase the application process time. 
+
+Let's look at other factor as well. 
+
+For this next try, I added the parameter Race, setting White as the reference for this categorical variable and checked the effect with degree centrality
+```{r}
+#Using the race, setting the reference on White and comparing the results
+applications2$race<-factor(applications2$race)
+applications2$race<-relevel(applications2$race, ref='white')
+attach(applications2)
+model5 <- lm(app_proc_time_days ~ degree_centrality+race, data = applications2)
+summary(model5)
+
+```
+We can see with the output that all coefficient are significant as p-value <0.05 which lean that the differences in application processing time between the reference category (white) and the each of the other race categories are unlikely to be due to chance. We can notice that all the coefficient are positive which mean that in our case, examiner that are not white tend to take more time to process the application. 
+
+
+```{r}
+model6 <- lm(app_proc_time_days ~ betweenness_centrality+race, data = applications2)
+summary(model6)
+```
+Interestingly the same thing happens with white as reference for the betweenness centrality. 
+
+Let's try it with a different reference. Let's make the race Asian the reference 
+```{r}
+#Asian as reference
+applications2$race<-relevel(applications2$race, ref='Asian')
+attach(applications2)
+model7<- lm(app_proc_time_days ~ degree_centrality+race, data = applications2)
+summary(model7)
+```
+Here we can see that some coefficient are negative. Race as White as a negative coefficient which make sens compared to our previous findings. But we can also notice that race as balck also have a negative coefficient. This means that for the same degree centrality, a black examiner will tend to process the application faster. 
+
+```{r}
+model8 <- lm(app_proc_time_days ~ betweenness_centrality+race, data = applications2)
+summary(model8)
+```
+Here again the same thing is happening for the betweenness centrality. 
+
+Let's check a last factor, the tenure days. 
+
+```{r}
+model11<- lm(app_proc_time_days ~ degree_centrality+tenure_days, data = applications2)
+summary(model11)
+```
+In this first linear regression with the degree centrality and the tenure days we can notice for a fixed degree centrality, for a one unit increase in tenure days, the application processing time decrease by 0.05 units. The p-value is also very small which lead us to think that this result is unlikely due to chance. 
+
+Let's check for the betweenness centrality
+
+```{r}
+model12<- lm(app_proc_time_days ~ betweenness_centrality+tenure_days, data = applications2)
+summary(model12)
+```
+The same is happening with almost the same values. 
+
+Finally let's see the degree centrality with the workgroups
+
+````{r}
+model13<- lm(app_proc_time_days ~ betweenness_centrality+workgroups, data = applications2)
+summary(model13)
+````
+The work group of reference is the workgroup 160. What we can see this workgroup tends to be slower at processing application than other groups. Indeed, we can see a lot a negative value from the coefficient from other groups. Still some coefficient are positive which it's not the slowest group. 
+
+
+
+
+Question 3: Does this relationship differ by examiner gender?
+
+Now let's check the relationship with centrality and the gender. 
+
+```{r}
+#Gender
+model14 <- lm(app_proc_time_days ~ degree_centrality + gender + degree_centrality*gender, data = applications2)
+summary(model14)
+```
+The results of this output are interesting. 
+With have an intercept of 1187, which means that for a female examiner for degree centrality of 0, the application process time 1187 days. Holding the gender constant (as female), for one unit increase in the degree centrality the application process time increases by 0.86. 
+We have a coefficient of 25 for the gendermale. This means that a for a degree centrality of 0, a male exmainer will take on average 25 more days to process an application. 
+The coefficient degree_centrality:gendermale indicates that the effects if the degree centrality on the application process time is weaker on the male examiner than on the female. Which mean the degree centrality affect male less. 
+
+Looking at the betweenness centrality now: 
+```{r}
+model15 <- lm(app_proc_time_days ~ betweenness_centrality + gender + betweenness_centrality*gender, data = applications2)
+summary(model15)
+
+```
+The results show that for a female with a betweenness centrality of 0, it takes around 1200 days to process an application. For every one unit increase in betweenness centrality, this processinf time increase by 0.0016. 
+For a betweennness degree of 0, a male examiner will take around 1215 days to process an application. 
+In this case the coefficient for the betweenness_centrality:gendermale is positive. This means that the impact of the betweenness centrality is more significant on the male than it is on the female examiners. 
+
+Question 4: 
+
+Overall what we have learned is the following : 
+Independently of the other feature studied, it seems like a higher centrality degree leads to a longer processing time. If we think about the centrality degree as someone seeking advice or some sought for advice we can make the link that maybe those people are loosing on efficiency while spending time helping other or looking for information to solve their problem. 
+The same thing goes for the betweenness centrality and the explanation can be pretty similar. 
+We've seen that white examiners for the same degree and betweenness centrality seems to be faster at processing application, followed by black examiners and then Asian examiners. 
+
+There was also a difference between male and female examiner. Overall female examiners tend to be faster at processing application, nevertheless the impact of the centrality is different. Indeed, the degree centrality has a less significant impact on men than on women, wehereas the betweenness centrality has a more significant impact on men than it has on women. 
+
